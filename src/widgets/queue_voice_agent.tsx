@@ -12,8 +12,6 @@ import {
 import { useState } from 'react';
 import { RealtimeAgent, RealtimeSession } from '@openai/agents/realtime';
 
-const PARENT_LEVELS_TO_INCLUDE = 3;
-
 async function parseRichText(
   plugin: RNPlugin,
   richText?: RichTextInterface,
@@ -142,8 +140,10 @@ function QueueVoiceAgent() {
         return;
       }
 
+      const levels = await plugin.settings.getSetting<number>('levels');
+
       // Get card content
-      const hierarchyText = await getHierarchyText(plugin, contextRem, PARENT_LEVELS_TO_INCLUDE);
+      const hierarchyText = await getHierarchyText(plugin, contextRem, levels);
       const questionText = await getFrontText(plugin, contextRem);
       const answerText = await getBackText(plugin, contextRem);
 

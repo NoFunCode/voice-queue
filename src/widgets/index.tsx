@@ -10,6 +10,13 @@ async function onActivate(plugin: ReactRNPlugin) {
     description: 'Needed to power the voice agent.',
   });
 
+   await plugin.settings.registerNumberSetting({
+    id: 'levels',
+    title: 'Parent Levels to Include',
+    description: 'Number of parent levels to include when the agent is presented with the flashcard content.',
+    defaultValue: 3,
+  });
+
   await plugin.app.registerWidget('queue_voice_agent', WidgetLocation.QueueToolbar, {
     dimensions: {
       height: 'auto',
