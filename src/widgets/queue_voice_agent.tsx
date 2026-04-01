@@ -50,6 +50,26 @@ async function getBackText(plugin: RNPlugin, contextRem?: Rem, cardType?: CardTy
     : parseRichText(plugin, contextRem?.backText);
 }
 
+async function getParentContextText(plugin: RNPlugin, contextRem?: Rem): Promise<string> {
+  if (!contextRem) return '';
+
+  const parentTexts: string[] = [];
+  let currentParent = await contextRem.getParentRem();
+  let depth = 0;
+
+  while (currentParent && depth < 20) {
+    const parentText = (await parseRichText(plugin, currentParent.text)).trim();
+    if (parentText) {
+      parentTexts.unshift(parentText);
+    }
+
+    currentParent = await currentParent.getParentRem();
+    depth += 1;
+  }
+
+  return parentTexts.join(', ');
+}
+
 async function getQuestion(
   plugin: RNPlugin,
   contextRem?: Rem,
@@ -58,9 +78,16 @@ async function getQuestion(
   if (!contextRem || !cardType) return '';
 
   const isCloze = typeof cardType === 'object' && 'clozeId' in cardType;
-  return cardType === 'forward' || isCloze
-    ? getFrontText(plugin, contextRem, cardType)
-    : getBackText(plugin, contextRem, cardType);
+  const questionText =
+    cardType === 'forward' || isCloze
+      ? await getFrontText(plugin, contextRem, cardType)
+      : await getBackText(plugin, contextRem, cardType);
+  const parentContextText = await getParentContextText(plugin, contextRem);
+
+  return [parentContextText, questionText]
+    .map((part) => part?.trim())
+    .filter(Boolean)
+    .join(', ');
 }
 
 function QueueVoiceAgent() {
