@@ -91,10 +91,16 @@ async function speak(text: string, apiKey: string, model: string, voice: string)
 
 function TextToSpeechWidget() {
   const plugin = usePlugin();
-  const [flashcard, setFlashcard] = useState<{ front: string; back: string; cardType: CardType }>({
+  const [flashcard, setFlashcard] = useState<{
+    front: string;
+    back: string;
+    cardType?: CardType;
+    context: string;
+  }>({
     front: '',
     back: '',
     cardType: 'forward',
+    context: '',
   });
 
   // Get all the settings we need for the TTS API call
@@ -106,7 +112,7 @@ function TextToSpeechWidget() {
     const widgetContext = await plugin.widget.getWidgetContext<WidgetLocation.QueueToolbar>();
 
     if (!widgetContext?.remId) {
-      setFlashcard({ front: '', back: '', cardType: 'forward' });
+      setFlashcard({ front: '', back: '', cardType: 'forward', context: '' });
       return;
     }
 
@@ -117,7 +123,25 @@ function TextToSpeechWidget() {
     const cardType = await card?.getType();
     const frontText = await getFrontText(plugin, contextRem, cardType);
     const backText = await getBackText(plugin, contextRem, cardType);
-    setFlashcard({ front: frontText, back: backText, cardType: cardType });
+
+    // Get parent rem context - collect all parent rems up the hierarchy
+    const getParentContext = async (rem?: Rem): Promise<string> => {
+      const parentTexts: string[] = [];
+      let currentRem = await rem?.getParentRem();
+
+      while (currentRem) {
+        const parentText = (await parseRichText(plugin, currentRem.text)).trim();
+        if (parentText) {
+          parentTexts.unshift(parentText);
+        }
+        currentRem = await currentRem.getParentRem();
+      }
+
+      return parentTexts.join(' ');
+    };
+
+    const context = await getParentContext(contextRem);
+    setFlashcard({ front: frontText, back: backText, cardType: cardType, context });
   };
 
   useEffect(() => {
@@ -133,7 +157,7 @@ function TextToSpeechWidget() {
   });
 
   useAPIEventListener(QueueEvent.QueueExit, undefined, () => {
-    setFlashcard({ front: '', back: '', cardType: 'forward' });
+    setFlashcard({ front: '', back: '', cardType: 'forward', context: '' });
   });
 
   useAPIEventListener(QueueEvent.QueueCompleteCard, undefined, () => {
@@ -151,12 +175,22 @@ function TextToSpeechWidget() {
       );
       return;
     }
-    speak(
-      flashcard.cardType === 'forward' ? flashcard.front : flashcard.back,
-      apiKey,
-      model,
-      voice
-    );
+
+    // Determine which text to speak based on card type
+    let textToSpeak = flashcard.front;
+    const isCloze = typeof flashcard.cardType === 'object' && 'clozeId' in flashcard.cardType;
+    const isForward = flashcard.cardType === 'forward';
+
+    if (!isForward && !isCloze) {
+      // Backward card
+      textToSpeak = flashcard.back;
+    }
+
+    textToSpeak = flashcard.context
+      ? `Context: ${flashcard.context}. Question: ${textToSpeak}`
+      : `Question: ${textToSpeak}`;
+
+    speak(textToSpeak, apiKey, model, voice);
   };
 
   return <button onClick={handleSpeak}>Start Voice Queue</button>;
