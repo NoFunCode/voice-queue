@@ -10,17 +10,9 @@ import {
   WidgetLocation,
 } from '@remnote/plugin-sdk';
 import { useState } from 'react';
+import { RealtimeAgent, RealtimeSession } from '@openai/agents/realtime';
 
 const PARENT_LEVELS_TO_INCLUDE = 3;
-
-function speak(text: string) {
-  const normalized = text.trim();
-  if (!normalized) return;
-
-  window.speechSynthesis.cancel();
-  const utterance = new SpeechSynthesisUtterance(normalized);
-  window.speechSynthesis.speak(utterance);
-}
 
 async function parseRichText(
   plugin: RNPlugin,
@@ -80,26 +72,6 @@ async function getBackText(
     : parseRichText(plugin, contextRem?.backText);
 }
 
-async function getCurrentCardText(
-  plugin: RNPlugin,
-  contextRem: Rem,
-  cardId: string,
-  showAnswer: boolean
-): Promise<string> {
-  const card = await plugin.card.findOne(cardId);
-  const cardType = await card?.getType();
-  const isCloze = typeof cardType === 'object' && 'clozeId' in cardType;
-
-  const frontText = await getFrontText(plugin, contextRem, cardType);
-  const backText = await getBackText(plugin, contextRem, cardType);
-
-  if (showAnswer) {
-    return cardType === 'forward' || isCloze ? backText : frontText;
-  }
-
-  return cardType === 'forward' || isCloze ? frontText : backText;
-}
-
 async function getHierarchyText(plugin: RNPlugin, rem: Rem, parentLevels: number): Promise<string> {
   const pathTexts: string[] = [];
   let current: Rem | undefined = await rem.getParentRem();
@@ -115,53 +87,135 @@ async function getHierarchyText(plugin: RNPlugin, rem: Rem, parentLevels: number
 
 function QueueVoiceAgent() {
   const plugin = usePlugin();
-  const [showAnswer, setShowAnswer] = useState(false);
-
-  useAPIEventListener(QueueEvent.RevealAnswer, undefined, () => {
-    setShowAnswer(true);
-  });
-
-  useAPIEventListener(QueueEvent.QueueCompleteCard, undefined, () => {
-    setShowAnswer(false);
-  });
-
-  useAPIEventListener(QueueEvent.QueueEnter, undefined, () => {
-    setShowAnswer(false);
-  });
+  const [isSessionActive, setIsSessionActive] = useState(false);
+  const [sessionRef] = useState<{ current: RealtimeSession | null }>({ current: null });
 
   useAPIEventListener(QueueEvent.QueueExit, undefined, () => {
-    setShowAnswer(false);
+    if (sessionRef.current) {
+      sessionRef.current.close();
+      sessionRef.current = null;
+      setIsSessionActive(false);
+    }
   });
 
-  const handleReadOutLoud = async () => {
-    const widgetContext = await plugin.widget.getWidgetContext<WidgetLocation.QueueToolbar>();
-    const contextRem = await plugin.rem.findOne(widgetContext.remId);
+  const getEphemeralToken = async (): Promise<string> => {
+    const apiKey = await plugin.settings.getSetting<string>('openai key');
+    if (!apiKey) {
+      throw new Error('OpenAI API key not configured in plugin settings');
+    }
 
-    if (!contextRem) {
-      plugin.app.toast('No current card rem found to speak.');
+    const response = await fetch('https://api.openai.com/v1/realtime/client_secrets', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        session: {
+          type: 'realtime',
+          model: 'gpt-realtime-1.5',
+        },
+      }),
+    });
+
+    if (!response.ok) {
+      throw new Error(`Failed to get ephemeral token: ${response.statusText}`);
+    }
+
+    const data = await response.json();
+    return data.value;
+  };
+
+  const handleStartVoiceSession = async () => {
+    if (isSessionActive) {
+      plugin.app.toast('Voice session already active');
       return;
     }
 
-    const hierarchyText = await getHierarchyText(plugin, contextRem, PARENT_LEVELS_TO_INCLUDE);
-    const cardText = await getCurrentCardText(plugin, contextRem, widgetContext.cardId, showAnswer);
+    try {
+      // Get current card
+      const widgetContext = await plugin.widget.getWidgetContext<WidgetLocation.QueueToolbar>();
+      const contextRem = await plugin.rem.findOne(widgetContext.remId);
 
-    const speechText = [hierarchyText, cardText].filter(Boolean).join('. ');
-    speak(speechText);
+      if (!contextRem) {
+        plugin.app.toast('No current card rem found.');
+        return;
+      }
+
+      // Get card content
+      const hierarchyText = await getHierarchyText(plugin, contextRem, PARENT_LEVELS_TO_INCLUDE);
+      const questionText = await getFrontText(plugin, contextRem);
+      const answerText = await getBackText(plugin, contextRem);
+
+      // Get ephemeral token
+      const token = await getEphemeralToken();
+
+      // Create agent with flashcard-specific instructions
+      const agent = new RealtimeAgent({
+        name: 'Flashcard Study Assistant',
+        instructions: `You are a supportive flashcard study assistant. Your role is to guide the user through flashcard learning:
+1. Present the flashcard question in a friendly, encouraging tone
+2. Wait for the user to answer via voice
+3. After the user gives their answer, respond with "I'll show you the answer now" or similar
+4. Then present the correct answer clearly
+5. Be conversational and supportive if the user gets an answer wrong
+6. Celebrate correct answers to encourage continued learning
+7. Keep responses concise and natural
+
+Current flashcard:
+Question: ${questionText}
+Answer: ${answerText}
+Context: ${hierarchyText}
+
+Start by reading the question to the user and ask them to answer.`,
+      });
+
+      // Create session
+      const session = new RealtimeSession(agent, {
+        model: 'gpt-realtime-1.5',
+      });
+
+      // Connect
+      await session.connect({ apiKey: token });
+
+      sessionRef.current = session;
+      setIsSessionActive(true);
+      plugin.app.toast('Voice session started. Please answer the question.');
+    } catch (error) {
+      console.error('Error starting voice session:', error);
+      plugin.app.toast(`Error: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
   };
 
-  return <button onClick={handleReadOutLoud}>🔊</button>;
+  const handleStopVoiceSession = async () => {
+    if (sessionRef.current) {
+      sessionRef.current.close();
+      sessionRef.current = null;
+      setIsSessionActive(false);
+      plugin.app.toast('Voice session ended.');
+    }
+  };
+
+  return (
+    <div style={{ display: 'flex', gap: '8px' }}>
+      <button
+        onClick={handleStartVoiceSession}
+        disabled={isSessionActive}
+        title="Start voice study session"
+        style={{
+          opacity: isSessionActive ? 0.5 : 1,
+          cursor: isSessionActive ? 'not-allowed' : 'pointer',
+        }}
+      >
+        🎤 Start Voice
+      </button>
+      {isSessionActive && (
+        <button onClick={handleStopVoiceSession} title="Stop voice session">
+          ⏹️ Stop
+        </button>
+      )}
+    </div>
+  );
 }
 
 renderWidget(QueueVoiceAgent);
-
-// Reads the current question of the flashcard
-function readQuestion() {}
-
-// Extract and store the user's answer from the voice input
-function storeAnswer() {}
-
-// Shows the answer of the flashcard after the user has given their answer or if they ask to see the answer
-function showAnswer() {}
-
-// Grades the user's answer based on how well it matches the correct answer
-function gradeAnswer() {}

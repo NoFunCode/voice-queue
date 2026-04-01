@@ -15,8 +15,6 @@ async function onActivate(plugin: ReactRNPlugin) {
       height: 'auto',
       width: 'auto',
     },
-    widgetTabIcon: 'https://em-content.zobj.net/source/apple/453/speaker-high-volume_1f50a.png',
-    widgetTabTitle: 'Voice Queue',
   });
 }
 

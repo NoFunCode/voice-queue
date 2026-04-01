@@ -11,11 +11,11 @@
     "minor": 0,
     "patch": 1
   },
-  "requestNative": false,
+  "requestNative": true,
   "requiredScopes": [
     {
       "type": "All",
-      "level": "ReadCreateModifyDelete"
+      "level": "Read"
     }
   ]
 }
