@@ -1,22 +1,21 @@
 {
+  "author": "Erik",
+  "name": "Voice Queue",
+  "description": "A voice agent for RemNote to have a learning buddy that understands and helps you.",
+  "enableOnMobile": true,
+  "id": "Erik-zm8r8z4",
+  "repoUrl": "https://github.com/NoFunCode/voice-queue",
   "manifestVersion": 1,
-  "id": "plugin_template",
-  "name": "Plugin Template",
-  "author": "remnote",
-  "repoUrl": "",
   "version": {
     "major": 0,
     "minor": 0,
     "patch": 1
   },
-  "theme": [],
-  "enableOnMobile": false,
-  "description": "",
   "requestNative": false,
   "requiredScopes": [
     {
       "type": "All",
-      "level": "Read"
+      "level": "ReadCreateModifyDelete"
     }
   ]
 }

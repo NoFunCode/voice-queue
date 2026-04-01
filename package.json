@@ -9,7 +9,11 @@
     "build": "npx remnote-plugin validate && shx rm -rf dist && cross-env NODE_ENV=production webpack --color --progress && cd dist && bestzip ../PluginZip.zip ./*"
   },
   "dependencies": {
+    "@livekit/agents": "^1.2.2",
+    "@livekit/agents-plugin-openai": "^1.2.2",
+    "@livekit/noise-cancellation-node": "^0.1.9",
     "@remnote/plugin-sdk": "latest",
+    "livekit-client": "^2.18.0",
     "react": "^17.0.2",
     "react-dom": "^17.0.2"
   },

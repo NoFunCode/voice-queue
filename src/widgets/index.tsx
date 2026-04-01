@@ -3,40 +3,20 @@ import '../style.css';
 import '../index.css'; // import <widget-name>.css
 
 async function onActivate(plugin: ReactRNPlugin) {
-  // Register settings
+
   await plugin.settings.registerStringSetting({
-    id: 'name',
-    title: 'What is your Name?',
-    defaultValue: 'Bob',
+    id: 'openai key',
+    title: 'OpenAI API Key',
+    description: 'Needed to power the voice agent.',
   });
 
-  await plugin.settings.registerBooleanSetting({
-    id: 'pizza',
-    title: 'Do you like pizza?',
-    defaultValue: true,
-  });
-
-  await plugin.settings.registerNumberSetting({
-    id: 'favorite-number',
-    title: 'What is your favorite number?',
-    defaultValue: 42,
-  });
-
-  // A command that inserts text into the editor if focused.
-  await plugin.app.registerCommand({
-    id: 'editor-command',
-    name: 'Editor Command',
-    action: async () => {
-      plugin.editor.insertPlainText('Hello World!');
+  await plugin.app.registerWidget('queue_voice_agent', WidgetLocation.QueueToolbar, {
+    dimensions: {
+      height: 'auto',
+      width: 'auto',
     },
-  });
-
-  // Show a toast notification to the user.
-  await plugin.app.toast("I'm a toast!");
-
-  // Register a sidebar widget.
-  await plugin.app.registerWidget('sample_widget', WidgetLocation.RightSidebar, {
-    dimensions: { height: 'auto', width: '100%' },
+    widgetTabIcon: 'https://em-content.zobj.net/source/apple/453/speaker-high-volume_1f50a.png',
+    widgetTabTitle: 'Voice Queue',
   });
 }
 
