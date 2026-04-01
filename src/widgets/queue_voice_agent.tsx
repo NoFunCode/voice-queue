@@ -1,35 +1,52 @@
 import {
   CardType,
-  renderWidget,
+  QueueEvent,
   Rem,
   RichTextInterface,
   RNPlugin,
+  renderWidget,
+  useAPIEventListener,
   usePlugin,
-  useRunAsync,
+  WidgetLocation,
 } from '@remnote/plugin-sdk';
-import { WidgetLocation } from '@remnote/plugin-sdk';
+import { useState } from 'react';
 
-function readOut(text: string) {
-  const utterance = new SpeechSynthesisUtterance(text);
+const PARENT_LEVELS_TO_INCLUDE = 3;
+
+function speak(text: string) {
+  const normalized = text.trim();
+  if (!normalized) return;
+
+  window.speechSynthesis.cancel();
+  const utterance = new SpeechSynthesisUtterance(normalized);
   window.speechSynthesis.speak(utterance);
 }
 
-async function parseRichText(plugin: RNPlugin, richText?: RichTextInterface, clozeId?: string) {
+async function parseRichText(
+  plugin: RNPlugin,
+  richText?: RichTextInterface,
+  clozeId?: string
+): Promise<string> {
   return plugin.richText.toString(
     richText?.map((n) => {
-      // Replace the cloze rich text element with "blank"
-      // if the current card is a cloze and it has the same cloze id
-      if (typeof n === 'object' && 'cId' in n) {
-        if (clozeId && n?.cId === clozeId) {
-          return 'blank';
-        }
+      if (typeof n === 'object' && 'cId' in n && clozeId && n.cId === clozeId) {
+        return 'blank';
       }
       return n;
     }) || []
   );
 }
 
-async function getFrontText(plugin: RNPlugin, contextRem?: Rem, cardType?: CardType) {
+async function parseMultilineText(plugin: RNPlugin, childrenRem: Rem[] = []): Promise<string> {
+  const text = await Promise.all(childrenRem.map((child) => parseRichText(plugin, child.text)));
+  return text.filter(Boolean).join(', ');
+}
+
+async function getFrontText(
+  plugin: RNPlugin,
+  contextRem?: Rem,
+  cardType?: CardType
+): Promise<string> {
   const isCloze = typeof cardType === 'object' && 'clozeId' in cardType;
   return parseRichText(
     plugin,
@@ -40,76 +57,96 @@ async function getFrontText(plugin: RNPlugin, contextRem?: Rem, cardType?: CardT
   );
 }
 
-async function getBackText(plugin: RNPlugin, contextRem?: Rem, cardType?: CardType) {
-  const isCloze = typeof cardType === 'object' && 'clozeId' in cardType;
-  return isCloze
-    ? parseRichText(
-        plugin,
-        (contextRem?.text || []).concat([' ']).concat(contextRem?.backText || [])
-      )
-    : parseRichText(plugin, contextRem?.backText);
-}
-
-async function getParentContextText(plugin: RNPlugin, contextRem?: Rem): Promise<string> {
-  if (!contextRem) return '';
-
-  const parentTexts: string[] = [];
-  let currentParent = await contextRem.getParentRem();
-  let depth = 0;
-
-  while (currentParent && depth < 20) {
-    const parentText = (await parseRichText(plugin, currentParent.text)).trim();
-    if (parentText) {
-      parentTexts.unshift(parentText);
-    }
-
-    currentParent = await currentParent.getParentRem();
-    depth += 1;
-  }
-
-  return parentTexts.join(', ');
-}
-
-async function getQuestion(
+async function getBackText(
   plugin: RNPlugin,
   contextRem?: Rem,
   cardType?: CardType
 ): Promise<string> {
-  if (!contextRem || !cardType) return '';
-
+  const childrenRem = (await contextRem?.getChildrenRem()) || [];
+  const isMultiline =
+    ((await Promise.all(childrenRem.map((child) => child.isCardItem()))).filter(Boolean).length ||
+      0) > 0;
   const isCloze = typeof cardType === 'object' && 'clozeId' in cardType;
-  const questionText =
-    cardType === 'forward' || isCloze
-      ? await getFrontText(plugin, contextRem, cardType)
-      : await getBackText(plugin, contextRem, cardType);
-  const parentContextText = await getParentContextText(plugin, contextRem);
 
-  return [parentContextText, questionText]
-    .map((part) => part?.trim())
-    .filter(Boolean)
-    .join(', ');
+  if (isCloze) {
+    return parseRichText(
+      plugin,
+      (contextRem?.text || []).concat([' ']).concat(contextRem?.backText || [])
+    );
+  }
+
+  return isMultiline
+    ? parseMultilineText(plugin, childrenRem)
+    : parseRichText(plugin, contextRem?.backText);
+}
+
+async function getCurrentCardText(
+  plugin: RNPlugin,
+  contextRem: Rem,
+  cardId: string,
+  showAnswer: boolean
+): Promise<string> {
+  const card = await plugin.card.findOne(cardId);
+  const cardType = await card?.getType();
+  const isCloze = typeof cardType === 'object' && 'clozeId' in cardType;
+
+  const frontText = await getFrontText(plugin, contextRem, cardType);
+  const backText = await getBackText(plugin, contextRem, cardType);
+
+  if (showAnswer) {
+    return cardType === 'forward' || isCloze ? backText : frontText;
+  }
+
+  return cardType === 'forward' || isCloze ? frontText : backText;
+}
+
+async function getHierarchyText(plugin: RNPlugin, rem: Rem, parentLevels: number): Promise<string> {
+  const pathTexts: string[] = [];
+  let current: Rem | undefined = await rem.getParentRem();
+
+  for (let i = 0; i < parentLevels && current; i += 1) {
+    const label = (await parseRichText(plugin, current.text)).trim();
+    if (label) pathTexts.push(label);
+    current = await current.getParentRem();
+  }
+
+  return pathTexts.reverse().join(' > ');
 }
 
 function QueueVoiceAgent() {
   const plugin = usePlugin();
+  const [showAnswer, setShowAnswer] = useState(false);
 
-  const question = useRunAsync(async () => {
-    const widgetContext = (await plugin.widget.getWidgetContext<WidgetLocation.QueueToolbar>()) as
-      | { remId?: string; cardId?: string }
-      | undefined;
+  useAPIEventListener(QueueEvent.RevealAnswer, undefined, () => {
+    setShowAnswer(true);
+  });
 
-    if (!widgetContext?.remId || !widgetContext?.cardId) return '';
+  useAPIEventListener(QueueEvent.QueueCompleteCard, undefined, () => {
+    setShowAnswer(false);
+  });
 
+  useAPIEventListener(QueueEvent.QueueEnter, undefined, () => {
+    setShowAnswer(false);
+  });
+
+  useAPIEventListener(QueueEvent.QueueExit, undefined, () => {
+    setShowAnswer(false);
+  });
+
+  const handleReadOutLoud = async () => {
+    const widgetContext = await plugin.widget.getWidgetContext<WidgetLocation.QueueToolbar>();
     const contextRem = await plugin.rem.findOne(widgetContext.remId);
-    const cardType = await (await plugin.card.findOne(widgetContext.cardId))?.getType();
 
-    return getQuestion(plugin, contextRem ?? undefined, cardType);
-  }, []);
-
-  const handleReadOutLoud = () => {
-    if (question) {
-      readOut(question);
+    if (!contextRem) {
+      plugin.app.toast('No current card rem found to speak.');
+      return;
     }
+
+    const hierarchyText = await getHierarchyText(plugin, contextRem, PARENT_LEVELS_TO_INCLUDE);
+    const cardText = await getCurrentCardText(plugin, contextRem, widgetContext.cardId, showAnswer);
+
+    const speechText = [hierarchyText, cardText].filter(Boolean).join('. ');
+    speak(speechText);
   };
 
   return <button onClick={handleReadOutLoud}>🔊</button>;
