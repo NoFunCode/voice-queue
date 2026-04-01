@@ -9,8 +9,8 @@ import {
   usePlugin,
   WidgetLocation,
 } from '@remnote/plugin-sdk';
-import { useState } from 'react';
-import { RealtimeAgent, RealtimeSession } from '@openai/agents/realtime';
+import { useRef, useState } from 'react';
+import OpenAI from 'openai';
 
 async function parseRichText(
   plugin: RNPlugin,
@@ -83,137 +83,233 @@ async function getHierarchyText(plugin: RNPlugin, rem: Rem, parentLevels: number
   return pathTexts.reverse().join(' > ');
 }
 
-function QueueVoiceAgent() {
-  const plugin = usePlugin();
-  const [isSessionActive, setIsSessionActive] = useState(false);
-  const [sessionRef] = useState<{ current: RealtimeSession | null }>({ current: null });
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
-  useAPIEventListener(QueueEvent.QueueExit, undefined, () => {
-    if (sessionRef.current) {
-      sessionRef.current.close();
-      sessionRef.current = null;
-      setIsSessionActive(false);
-    }
+function triggerShowAnswerAction(): boolean {
+  const buttonCandidates = Array.from(document.querySelectorAll<HTMLButtonElement>('button'));
+  const matchingButton = buttonCandidates.find((button) => {
+    const label = `${button.textContent || ''} ${button.getAttribute('aria-label') || ''}`
+      .toLowerCase()
+      .trim();
+    return label.includes('show answer') || label.includes('reveal answer');
   });
 
-  const getEphemeralToken = async (): Promise<string> => {
-    const apiKey = await plugin.settings.getSetting<string>('openai key');
-    if (!apiKey) {
-      throw new Error('OpenAI API key not configured in plugin settings');
+  if (matchingButton) {
+    matchingButton.click();
+    return true;
+  }
+
+  const activeElement = document.activeElement;
+  if (activeElement instanceof HTMLElement) {
+    activeElement.dispatchEvent(
+      new KeyboardEvent('keydown', {
+        key: ' ',
+        code: 'Space',
+        bubbles: true,
+      })
+    );
+    activeElement.dispatchEvent(
+      new KeyboardEvent('keyup', {
+        key: ' ',
+        code: 'Space',
+        bubbles: true,
+      })
+    );
+    return true;
+  }
+
+  return false;
+}
+
+async function speak(
+  text: string,
+  apiKey: string,
+  model: string,
+  voice: string,
+  instructions?: string
+) {
+  const openai = new OpenAI({ apiKey });
+  const response = await openai.audio.speech.create({
+    model,
+    voice,
+    input: text,
+    instructions,
+    response_format: 'wav',
+  });
+
+  console.log('TTS response:', response);
+}
+
+function QueueVoiceAgent() {
+  const plugin = usePlugin();
+  const [isModeActive, setIsModeActive] = useState(false);
+  const [status, setStatus] = useState('Idle');
+  const runIdRef = useRef(0);
+  const isModeActiveRef = useRef(false);
+
+  const stopMode = (showToast: boolean) => {
+    isModeActiveRef.current = false;
+    setIsModeActive(false);
+    setStatus('Stopped');
+    runIdRef.current += 1;
+    if (showToast) {
+      plugin.app.toast('TTS study mode stopped.');
     }
-
-    const response = await fetch('https://api.openai.com/v1/realtime/client_secrets', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        session: {
-          type: 'realtime',
-          model: 'gpt-realtime-1.5',
-        },
-      }),
-    });
-
-    if (!response.ok) {
-      throw new Error(`Failed to get ephemeral token: ${response.statusText}`);
-    }
-
-    const data = await response.json();
-    return data.value;
   };
 
-  const handleStartVoiceSession = async () => {
-    if (isSessionActive) {
-      plugin.app.toast('Voice session already active');
-      return;
-    }
+  const runCurrentCardCycle = async () => {
+    const runId = runIdRef.current;
+
+    if (!isModeActiveRef.current) return;
 
     try {
-      // Get current card
+      setStatus('Preparing card');
+
       const widgetContext = await plugin.widget.getWidgetContext<WidgetLocation.QueueToolbar>();
       const contextRem = await plugin.rem.findOne(widgetContext.remId);
 
       if (!contextRem) {
+        setStatus('No card context');
         plugin.app.toast('No current card rem found.');
         return;
       }
 
       const levels = await plugin.settings.getSetting<number>('levels');
+      const thinkSeconds = await plugin.settings.getSetting<number>('think seconds');
+      const apiKey = await plugin.settings.getSetting<string>('key');
+      const model = await plugin.settings.getSetting<string>('model');
+      const voice = await plugin.settings.getSetting<string>('voice');
 
-      // Get card content
       const hierarchyText = await getHierarchyText(plugin, contextRem, levels);
       const questionText = await getFrontText(plugin, contextRem);
       const answerText = await getBackText(plugin, contextRem);
 
-      // Get ephemeral token
-      const token = await getEphemeralToken();
+      if (runId !== runIdRef.current || !isModeActiveRef.current) return;
 
-      // Create agent with flashcard-specific instructions
-      const agent = new RealtimeAgent({
-        name: 'Flashcard Study Assistant',
-        instructions: `You are a supportive flashcard study assistant. Your role is to guide the user through flashcard learning:
-1. Present the flashcard question in a friendly, encouraging tone
-2. Wait for the user to answer via voice
-3. After the user gives their answer, respond with "I'll show you the answer now" or similar
-4. Then present the correct answer clearly
-5. Be conversational and supportive if the user gets an answer wrong
-6. Celebrate correct answers to encourage continued learning
-7. Keep responses concise and natural
+      // Read context and question
+      setStatus('Reading context and question');
+      if (apiKey) {
+        try {
+          const contextQuestion = hierarchyText
+            ? `${hierarchyText}. ${questionText}`
+            : questionText;
+          await speak(contextQuestion, apiKey, model, voice);
+        } catch (error) {
+          console.error('Error speaking context/question:', error);
+        }
+      }
 
-Current flashcard:
-Question: ${questionText}
-Answer: ${answerText}
-Context: ${hierarchyText}
+      if (runId !== runIdRef.current || !isModeActiveRef.current) return;
 
-Start by reading the question to the user and ask them to answer.`,
-      });
+      // Think time
+      if (thinkSeconds > 0) {
+        setStatus(`Thinking for ${thinkSeconds} seconds`);
+        await sleep(thinkSeconds * 1000);
+      }
 
-      // Create session
-      const session = new RealtimeSession(agent, {
-        model: 'gpt-realtime-1.5',
-      });
+      if (runId !== runIdRef.current || !isModeActiveRef.current) return;
 
-      // Connect
-      await session.connect({ apiKey: token });
+      // Reveal and read answer
+      setStatus('Revealing answer');
+      const revealTriggered = triggerShowAnswerAction();
+      if (!revealTriggered) {
+        plugin.app.toast('Could not auto-click Show Answer. Please reveal manually.');
+      }
+      await sleep(150);
 
-      sessionRef.current = session;
-      setIsSessionActive(true);
-      plugin.app.toast('Voice session started. Please answer the question.');
+      if (runId !== runIdRef.current || !isModeActiveRef.current) return;
+
+      setStatus('Reading answer');
+      if (apiKey) {
+        try {
+          await speak(answerText, apiKey, model, voice);
+        } catch (error) {
+          console.error('Error speaking answer:', error);
+        }
+      }
+
+      if (runId !== runIdRef.current || !isModeActiveRef.current) return;
+
+      setStatus('Waiting for manual grade');
     } catch (error) {
-      console.error('Error starting voice session:', error);
+      console.error('TTS card cycle failed:', error);
+      setStatus('Error');
+      plugin.app.toast(`Error: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      stopMode(false);
+    }
+  };
+
+  useAPIEventListener(QueueEvent.QueueExit, undefined, () => {
+    stopMode(false);
+  });
+
+  useAPIEventListener(QueueEvent.QueueCompleteCard, undefined, () => {
+    if (!isModeActiveRef.current) return;
+
+    setStatus('Card graded. Loading next card');
+    const currentRunId = runIdRef.current;
+    void (async () => {
+      await sleep(250);
+      if (!isModeActiveRef.current || currentRunId !== runIdRef.current) return;
+      await runCurrentCardCycle();
+    })();
+  });
+
+  const handleStartMode = async () => {
+    if (isModeActiveRef.current) {
+      plugin.app.toast('TTS study mode is already active.');
+      return;
+    }
+
+    isModeActiveRef.current = true;
+    setIsModeActive(true);
+    setStatus('Starting');
+    runIdRef.current += 1;
+
+    try {
+      const widgetContext = await plugin.widget.getWidgetContext<WidgetLocation.QueueToolbar>();
+      const contextRem = await plugin.rem.findOne(widgetContext.remId);
+
+      if (!contextRem) {
+        stopMode(false);
+        plugin.app.toast('No current card rem found.');
+        return;
+      }
+
+      plugin.app.toast('TTS study mode started.');
+      await runCurrentCardCycle();
+    } catch (error) {
+      stopMode(false);
+      console.error('Error starting TTS study mode:', error);
       plugin.app.toast(`Error: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
   };
 
-  const handleStopVoiceSession = async () => {
-    if (sessionRef.current) {
-      sessionRef.current.close();
-      sessionRef.current = null;
-      setIsSessionActive(false);
-      plugin.app.toast('Voice session ended.');
-    }
+  const handleStopMode = async () => {
+    stopMode(true);
   };
 
   return (
     <div style={{ display: 'flex', gap: '8px' }}>
       <button
-        onClick={handleStartVoiceSession}
-        disabled={isSessionActive}
-        title="Start voice study session"
+        onClick={handleStartMode}
+        disabled={isModeActive}
+        title="Start TTS study mode"
         style={{
-          opacity: isSessionActive ? 0.5 : 1,
-          cursor: isSessionActive ? 'not-allowed' : 'pointer',
+          opacity: isModeActive ? 0.5 : 1,
+          cursor: isModeActive ? 'not-allowed' : 'pointer',
         }}
       >
-        🎤 Start Voice
+        Start TTS Mode
       </button>
-      {isSessionActive && (
-        <button onClick={handleStopVoiceSession} title="Stop voice session">
-          ⏹️ Stop
+      {isModeActive && (
+        <button onClick={handleStopMode} title="Stop TTS study mode">
+          Stop
         </button>
       )}
+      <span style={{ alignSelf: 'center' }}>{status}</span>
     </div>
   );
 }
